@@ -49,15 +49,13 @@ pub async fn compress(mut multipart: Multipart) -> AppResult<Json<CompressRespon
         let image = image::load_from_memory(&bytes).map_err(|_| AppError::InvalidImageFile)?;
         let original_width = image.width();
         let original_height = image.height();
-        let resized_image = image_utils::resize_for_compression(image);
-        let compressed_width = resized_image.width();
-        let compressed_height = resized_image.height();
-        let compressed_bytes = image_utils::encode_jpeg(&resized_image)
+        let compressed_image = image_utils::compress_jpeg_or_keep_original(image, &bytes)
             .map_err(|source| AppError::FailedToSaveCompressedImage { source })?;
 
         let file_id = storage::generate_file_id();
         let original_file = storage::save_original_image(&bytes, &extension, file_id).await?;
-        let compressed_file = storage::save_compressed_image(&compressed_bytes, file_id).await?;
+        let compressed_file =
+            storage::save_compressed_image(&compressed_image.bytes, file_id).await?;
         let original_path = original_file.path.to_string_lossy().into_owned();
         let compressed_path = compressed_file.path.to_string_lossy().into_owned();
 
@@ -66,11 +64,11 @@ pub async fn compress(mut multipart: Multipart) -> AppResult<Json<CompressRespon
         tracing::info!(
             original_width,
             original_height,
-            compressed_width,
-            compressed_height,
+            compressed_width = compressed_image.width,
+            compressed_height = compressed_image.height,
             "Image compressed: {} -> {} bytes",
             bytes.len(),
-            compressed_bytes.len()
+            compressed_image.bytes.len()
         );
 
         return Ok(Json(CompressResponse {
@@ -79,11 +77,11 @@ pub async fn compress(mut multipart: Multipart) -> AppResult<Json<CompressRespon
             compressed_file_name: compressed_file.file_name,
             compressed_path,
             original_size: bytes.len(),
-            compressed_size: compressed_bytes.len(),
+            compressed_size: compressed_image.bytes.len(),
             original_width,
             original_height,
-            compressed_width,
-            compressed_height,
+            compressed_width: compressed_image.width,
+            compressed_height: compressed_image.height,
         }));
     }
 
