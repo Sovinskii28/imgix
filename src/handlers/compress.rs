@@ -1,9 +1,13 @@
 use crate::{
     errors::{AppError, AppResult},
+    state::AppState,
     utils::{image as image_utils, storage},
 };
 
-use axum::{Json, extract::Multipart};
+use axum::{
+    Json,
+    extract::{Multipart, State},
+};
 use serde::Serialize;
 use std::path::Path;
 
@@ -23,7 +27,10 @@ pub struct CompressResponse {
     pub compressed_height: u32,
 }
 
-pub async fn compress(mut multipart: Multipart) -> AppResult<Json<CompressResponse>> {
+pub async fn compress(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> AppResult<Json<CompressResponse>> {
     while let Some(field) = multipart
         .next_field()
         .await
@@ -46,11 +53,30 @@ pub async fn compress(mut multipart: Multipart) -> AppResult<Json<CompressRespon
 
         tracing::info!("Image received: {} bytes", bytes.len());
 
-        let image = image::load_from_memory(&bytes).map_err(|_| AppError::InvalidImageFile)?;
-        let original_width = image.width();
-        let original_height = image.height();
-        let compressed_image = image_utils::compress_jpeg_or_keep_original(image, &bytes)
-            .map_err(|source| AppError::FailedToSaveCompressedImage { source })?;
+        let _permit = state
+            .compression_permits
+            .acquire_owned()
+            .await
+            .map_err(|source| AppError::Internal {
+                source: source.into(),
+            })?;
+        let compression_bytes = bytes.clone();
+        let (original_width, original_height, compressed_image) =
+            tokio::task::spawn_blocking(move || -> AppResult<_> {
+                let image = image::load_from_memory(&compression_bytes)
+                    .map_err(|_| AppError::InvalidImageFile)?;
+                let original_width = image.width();
+                let original_height = image.height();
+                let compressed_image =
+                    image_utils::compress_jpeg_or_keep_original(image, &compression_bytes)
+                        .map_err(|source| AppError::FailedToSaveCompressedImage { source })?;
+
+                Ok((original_width, original_height, compressed_image))
+            })
+            .await
+            .map_err(|source| AppError::Internal {
+                source: source.into(),
+            })??;
 
         let file_id = storage::generate_file_id();
         let original_file = storage::save_original_image(&bytes, &extension, file_id).await?;
